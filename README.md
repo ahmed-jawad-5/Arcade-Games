@@ -1,3 +1,5 @@
+<img width="476" height="848" alt="snake1" src="https://github.com/user-attachments/assets/0a8ec82e-0a3a-4a49-8075-1aec36271ce4" />
+
 # 🐍 AVR Assembly Snake Game — Arduino Uno + ST7789 TFT
 
 A fully playable Snake game running on an **Arduino Uno**, written in **AVR Assembly** for all game logic, with a thin C++ driver layer for display rendering. Controls are handled via an **analog joystick** and the game is displayed on a **240×320 ST7789 TFT LCD** over SPI.
