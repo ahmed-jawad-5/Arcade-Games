@@ -202,10 +202,6 @@ void loop(void)
      *                        (set by draw_head in asm_game_tick).
      *  3. req_spawn_food  — draw freshly spawned food in orange.
      *  4. req_show_score  — refresh the score HUD.
-     *
-     * req_erase_tail and req_draw_cell are kept in separate
-     * variables so neither write clobbers the other while the
-     * assembly is still running.
      */
 
     // 1. Erase old tail cell
@@ -216,7 +212,6 @@ void loop(void)
 
     // 2. Draw new head (or any other single-cell update)
     if (req_draw_cell) {
-        // Color is already packed as RGB-565 by the assembly
         drawCell(req_draw_cell_x, req_draw_cell_y,
                  static_cast<uint16_t>(req_draw_cell_color));
         req_draw_cell = 0u;

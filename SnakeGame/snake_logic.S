@@ -249,20 +249,12 @@ move_snake:
     adc  r29, r1
     ld   r21, Y             ; r21 = tail_y
 
-    ; Request erase (BLACK) for tail cell via C-side draw queue
-    ; We set req_draw_cell2 vars so C can handle both draws per tick.
-    ; For simplicity we use the same single-slot mechanism; C must
-    ; call drawCell directly for tail before processing head.
-    ; We signal the C side with req_erase_tail (handled in .ino).
-    ; Store tail erase in dedicated vars so req_draw_cell stays free
-    ; for the head draw that follows in asm_game_tick.
     sts  req_erase_tail_x, r20
     sts  req_erase_tail_y, r21
     ldi  r18, 1
     sts  req_erase_tail, r18
 
     ; --- Shift body: snake_x[i] = snake_x[i-1] for i = len-1 down to 1 ---
-    ; r22 = snake_len,  loop r18 from (len-1) down to 1
     mov  r18, r22
     dec  r18                ; r18 = snake_len - 1
 shift_loop:
@@ -332,12 +324,7 @@ score_no_carry:
     ldi  r20, 1
     sts  req_show_score, r20
 
-    ; Shift existing body (same as move_snake but NO tail erase —
-    ; the tail stays because the snake grew)
-    ; We do NOT erase the tail; instead we shift indices 1..len-1
-    ; to 2..len (the new last index is the old last index, kept).
-    ; Actually: since we incremented len first, old len-1 is now
-    ; len-2 (0-based). We shift [i] = [i-1] for i=len-1 down to 1.
+    ; Shift existing body indices 1..len-1 to 2..len
     lds  r18, snake_len
     dec  r18            ; r18 = new len - 1  (= old len)
 eat_shift_loop:
@@ -373,39 +360,88 @@ eat_shift_loop:
     dec  r18
     rjmp eat_shift_loop
 eat_shift_done:
-    ; Spawn new food at a random location
-    ; (asm_rand/mod8 will clobber r16/r17 — restore them after)
+    ; Spawn new food at a random free location
     rcall spawn_food_rand
     pop  r17                ; restore new_head_y
     pop  r16                ; restore new_head_x
     ret
 
 ; ---------------------------------------------------------------
-; spawn_food_rand – pick a random cell not occupied by the snake
-; Uses asm_rand; stores result in food_x, food_y
-; Also requests the C side to draw the food cell in RED.
-; Clobbers: r16..r21, r24/r25
+; spawn_food_rand – pick a random cell NOT occupied by the snake.
+;
+; FIX (v2): Two bugs corrected from the original:
+;   1. food_x candidate was being clobbered before it was saved,
+;      because asm_rand/mod8 for Y both write into r16.  Now we
+;      push food_x onto the stack before generating Y, then pop
+;      it back, so both axes come from independent rand calls.
+;   2. No body-overlap check existed.  A retry loop now walks
+;      every snake segment and restarts if the candidate cell
+;      matches any of them, guaranteeing food never spawns
+;      inside the snake.
+;
+; Clobbers: r16..r22, r24/r25, r28/r29
+; Result:   food_x, food_y updated; req_spawn_food = 1.
 ; ---------------------------------------------------------------
 spawn_food_rand:
-    ; Generate random x in [1 .. GRID_W-2]
-    rcall asm_rand          ; result in r24 (low byte sufficient)
-    ldi  r18, GRID_W-2      ; modulo range
-    mov  r16, r24
-    rcall mod8              ; r16 = r16 % r18
-    inc  r16                ; shift to [1 .. GRID_W-2]
-    sts  food_x, r16
+sfr_retry:
+    ; ── Generate candidate X in [1 .. GRID_W-2] ──────────────
+    rcall asm_rand          ; random value → r24
+    ldi   r18, GRID_W-2     ; modulo range = 28
+    mov   r16, r24
+    rcall mod8              ; r16 = r16 % 28  →  [0..27]
+    inc   r16               ; r16 = food_x candidate  [1..28]
 
-    ; Generate random y in [1 .. GRID_H-2]
-    rcall asm_rand
-    ldi  r18, GRID_H-2
-    mov  r16, r24
-    rcall mod8
-    inc  r16
-    sts  food_y, r16
+    ; Save food_x on the stack before asm_rand clobbers r16
+    push  r16
 
-    ; Request draw food cell RED via req_spawn_food flag (C handles it)
-    ldi  r16, 1
-    sts  req_spawn_food, r16
+    ; ── Generate candidate Y in [1 .. GRID_H-2] ──────────────
+    rcall asm_rand          ; new random value → r24
+    ldi   r18, GRID_H-2     ; modulo range = 38
+    mov   r16, r24
+    rcall mod8              ; r16 = r16 % 38  →  [0..37]
+    inc   r16               ; r16 = food_y candidate  [1..38]
+    mov   r17, r16          ; r17 holds food_y candidate
+
+    pop   r16               ; r16 restored = food_x candidate
+
+    ; ── Check candidate against every snake body segment ──────
+    ; If (r16, r17) matches any (snake_x[i], snake_y[i]) → retry.
+    lds   r22, snake_len    ; r22 = number of segments to check
+    ldi   r18, 0            ; r18 = segment index, start at 0
+sfr_check_loop:
+    cp    r18, r22
+    brsh  sfr_accept        ; all segments checked → candidate is free
+
+    ; Load snake_x[r18]
+    ldi   r28, lo8(snake_x)
+    ldi   r29, hi8(snake_x)
+    add   r28, r18
+    adc   r29, r1
+    ld    r19, Y            ; r19 = snake_x[i]
+
+    cp    r16, r19
+    brne  sfr_next          ; X differs → no collision on this segment
+
+    ; X matched — now check Y
+    ldi   r28, lo8(snake_y)
+    ldi   r29, hi8(snake_y)
+    add   r28, r18
+    adc   r29, r1
+    ld    r19, Y            ; r19 = snake_y[i]
+
+    cp    r17, r19
+    breq  sfr_retry         ; both X and Y match → pick new random coords
+
+sfr_next:
+    inc   r18
+    rjmp  sfr_check_loop
+
+sfr_accept:
+    ; ── Commit the free position ──────────────────────────────
+    sts   food_x, r16
+    sts   food_y, r17
+    ldi   r16, 1
+    sts   req_spawn_food, r16
     ret
 
 ; ---------------------------------------------------------------
@@ -467,31 +503,8 @@ csc_no_hit:
 ; ---------------------------------------------------------------
 ; read_joystick  –  full 10-bit ADC read on both axes, dominant-
 ;                   axis selection, 180° reversal prevention.
-;
-; Strategy:
-;   • Read X (A0) and Y (A1) as full 10-bit values (0–1023).
-;   • Centre ≈ 512.  Thresholds:
-;       deflected low  : value < 384  (centre - 128)
-;       deflected high : value > 640  (centre + 128)
-;       dead zone      : 384–640  → ignore
-;   • Compute "deflection magnitude" for each axis as the
-;     absolute distance from 512, keeping only 8 bits
-;     (divide by 4 via 2× right-shift so it fits in r8).
-;   • Only act on the MORE deflected axis (dominant axis).
-;     This prevents diagonal pushes from mis-firing.
-;   • Prevent 180° reversal as before.
-;
-; Register map inside this function:
-;   r16/r17  – raw X ADC value (lo/hi)
-;   r18/r19  – raw Y ADC value (lo/hi)
-;   r20      – X deflection magnitude (8-bit, unsigned)
-;   r21      – Y deflection magnitude (8-bit, unsigned)
-;   r22      – direction: 0=none, 1=left, 2=right, 3=up, 4=down
-;   r24/r25  – current dir_x / dir_y
 ; ---------------------------------------------------------------
 
-; Threshold constants (8-bit after >>2):  384>>2=96,  640>>2=160
-; We compare the 8-bit-shifted value, centre = 512>>2 = 128
 #define JOY_THRESH_LO  96
 #define JOY_THRESH_HI  160
 
@@ -533,60 +546,49 @@ rj_wait_y:
     lds  r19, ADCH_REG          ; r19:r18 = 10-bit Y
 
     ; ── Compress to 8-bit by right-shifting 2 places ─────────
-    ; X: r17:r16 >> 2  →  store high result in r16
-    ;    r16 = (r17<<6) | (r16>>2)
     lsr  r17
     ror  r16
     lsr  r17
     ror  r16                    ; r16 = X >> 2  (0..255, centre≈128)
 
-    ; Y: same
     lsr  r19
     ror  r18
     lsr  r19
     ror  r18                    ; r18 = Y >> 2  (0..255, centre≈128)
 
     ; ── Compute deflection magnitudes (|val - 128|) ───────────
-    ; X magnitude → r20
     ldi  r20, 128
     cp   r16, r20
     brsh rj_x_above
-    sub  r20, r16               ; r20 = 128 - X  (low side)
+    sub  r20, r16
     rjmp rj_x_mag_done
 rj_x_above:
     mov  r20, r16
-    subi r20, 128               ; r20 = X - 128  (high side)
+    subi r20, 128
 rj_x_mag_done:
 
-    ; Y magnitude → r21
     ldi  r21, 128
     cp   r18, r21
     brsh rj_y_above
-    sub  r21, r18               ; r21 = 128 - Y
+    sub  r21, r18
     rjmp rj_y_mag_done
 rj_y_above:
     mov  r21, r18
-    subi r21, 128               ; r21 = Y - 128
+    subi r21, 128
 rj_y_mag_done:
 
     ; ── Determine dominant axis ───────────────────────────────
-    ; r22 = intended direction: 0=none,1=left,2=right,3=up,4=down
     clr  r22
 
-    ; Check if either axis is deflected enough to register
-    ; (magnitude must exceed threshold: 128-96=32 on low side)
-    ; We check: if X_mag > Y_mag → process X axis, else Y axis.
-    ; But only if the winning axis actually exceeds dead-zone.
-
-    cp   r20, r21               ; X_mag vs Y_mag
-    brsh rj_x_dominant          ; X is >= Y in deflection
+    cp   r20, r21
+    brsh rj_x_dominant
 
     ; ── Y axis is dominant ────────────────────────────────────
     cpi  r18, JOY_THRESH_LO
-    brlo rj_dir_up              ; Y < 96  → up
+    brlo rj_dir_up
     cpi  r18, JOY_THRESH_HI
-    brsh rj_dir_down            ; Y > 160 → down
-    rjmp rj_apply               ; Y in dead zone → no change
+    brsh rj_dir_down
+    rjmp rj_apply
 
 rj_dir_up:
     ldi  r22, 3
@@ -599,10 +601,10 @@ rj_dir_down:
     ; ── X axis is dominant ────────────────────────────────────
 rj_x_dominant:
     cpi  r16, JOY_THRESH_LO
-    brlo rj_dir_left            ; X < 96  → left
+    brlo rj_dir_left
     cpi  r16, JOY_THRESH_HI
-    brsh rj_dir_right           ; X > 160 → right
-    rjmp rj_apply               ; X in dead zone → no change
+    brsh rj_dir_right
+    rjmp rj_apply
 
 rj_dir_left:
     ldi  r22, 1
@@ -614,7 +616,7 @@ rj_dir_right:
     ; ── Apply direction (with 180° reversal guard) ────────────
 rj_apply:
     tst  r22
-    breq joy_exit               ; no input → keep current direction
+    breq joy_exit
 
     lds  r24, dir_x
     lds  r25, dir_y
@@ -646,7 +648,6 @@ rj_chk_up:
     rjmp rj_save
 
 rj_chk_down:
-    ; direction must be 4 (down)
     cpi  r25, 0xFF              ; currently going up? → ignore
     breq joy_exit
     ldi  r25, 1
