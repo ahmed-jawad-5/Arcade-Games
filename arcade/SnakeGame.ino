@@ -1,5 +1,6 @@
 /*
- * SnakeGame.cpp — Snake + Pac-Man  (Arduino Uno + ST7789 240×320 + KY-023 joystick)
+ * SnakeGame.cpp — Snake + Pac-Man + Flappy Bird
+ * (Arduino Uno + ST7789 240×320 + KY-023 joystick)
  *
  * Wiring:
  *   TFT CS→D10  DC→D9  RST→D8  MOSI→D11  SCK→D13
@@ -7,23 +8,13 @@
  *
  * Libraries: Adafruit ST7789 + Adafruit GFX
  * Also needs: snake_logic.S  +  Snake_asm.h  in the same sketch folder.
- *
- * PAC-MAN changes in this revision
- * ──────────────────────────────────
- *  • 4 ghosts, all with distinct start positions inside the open pen
- *  • Pellets placed ONLY on open non-pen, non-border tiles → dots always visible
- *  • Ghost sprite erase now restores underlying dot/wall instead of black-filling
- *  • Collision uses pixel-overlap test (not just tile match) → reliable kills
- *  • Power pellet = FREEZE: ghosts freeze in place, touching them is harmless;
- *    no "eaten" / return-to-base logic at all
- *  • Win condition counts only actual pellet tiles
  */
 
 #include <Arduino.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
-#include "Snake_asm.h"
+#include "arcade_asm.h"
 
 // ═══════════════════════════════════════════════════════════════
 //  HARDWARE
@@ -51,8 +42,8 @@ static Adafruit_ST7789 tft(TFT_CS, TFT_DC, TFT_RST);
 // ═══════════════════════════════════════════════════════════════
 //  GAME MODE
 // ═══════════════════════════════════════════════════════════════
-enum GameMode : uint8_t { MODE_MENU=0, MODE_SNAKE, MODE_PACMAN };
-static GameMode gameMode     = MODE_MENU;
+enum GameMode : uint8_t { MODE_MENU=0, MODE_SNAKE, MODE_PACMAN, MODE_FLAPPY };
+static GameMode gameMode      = MODE_MENU;
 static uint8_t  menuSelection = 0;
 
 static uint32_t lastBtnTime = 0;
@@ -75,35 +66,49 @@ static void drawInitialSnake(void);
 static void drawSnakeGameOver(void);
 static void resetAndRedrawSnake(void); static void handleSnake(void);
 static void pacmanInit(void);     static void handlePacMan(void);
+static void flappyInit(void);     static void handleFlappy(void);
 
 // ═══════════════════════════════════════════════════════════════
-//  MENU
+//  MENU  (updated for 3 games)
 // ═══════════════════════════════════════════════════════════════
 static void drawMenu(void){
     tft.fillScreen(ST77XX_BLACK);
     tft.setTextSize(2); tft.setTextColor(ST77XX_YELLOW);
-    tft.setCursor(30,40);  tft.print(F("ARCADE"));
-    tft.setCursor(42,62);  tft.print(F("GAMES"));
-    tft.drawFastHLine(10,90,220,ST77XX_WHITE);
-    tft.setTextColor(menuSelection==0?ST77XX_GREEN:ST77XX_WHITE);
-    tft.setCursor(40,130); tft.print(F("1. SNAKE"));
-    tft.setTextColor(menuSelection==1?RGB565(255,255,0):ST77XX_WHITE);
-    tft.setCursor(28,175); tft.print(F("2. PAC-MAN"));
-    tft.drawFastHLine(10,220,220,ST77XX_WHITE);
+    tft.setCursor(30,30);  tft.print(F("ARCADE"));
+    tft.setCursor(42,52);  tft.print(F("GAMES"));
+    tft.drawFastHLine(10,76,220,ST77XX_WHITE);
+
+    tft.setTextColor(menuSelection==0 ? ST77XX_GREEN : ST77XX_WHITE);
+    tft.setCursor(40,100); tft.print(F("1. SNAKE"));
+
+    tft.setTextColor(menuSelection==1 ? RGB565(255,255,0) : ST77XX_WHITE);
+    tft.setCursor(28,145); tft.print(F("2. PAC-MAN"));
+
+    tft.setTextColor(menuSelection==2 ? RGB565(255,160,0) : ST77XX_WHITE);
+    tft.setCursor(16,190); tft.print(F("3. FLAPPY"));
+
+    tft.drawFastHLine(10,228,220,ST77XX_WHITE);
     tft.setTextSize(1); tft.setTextColor(ST77XX_CYAN);
-    tft.setCursor(18,240); tft.print(F("Joystick UP/DOWN to select"));
-    tft.setCursor(28,256); tft.print(F("Press button to start"));
+    tft.setCursor(18,244); tft.print(F("Joystick UP/DOWN to select"));
+    tft.setCursor(28,260); tft.print(F("Press button to start"));
 }
+
 static void handleMenu(void){
     int vy=analogRead(A1);
     static uint32_t lm=0;
     if(millis()-lm>300ul){
-        if(vy<400&&menuSelection!=0){menuSelection=0;drawMenu();lm=millis();}
-        else if(vy>624&&menuSelection!=1){menuSelection=1;drawMenu();lm=millis();}
+        if(vy<400 && menuSelection>0){
+            menuSelection--;
+            drawMenu(); lm=millis();
+        } else if(vy>624 && menuSelection<2){
+            menuSelection++;
+            drawMenu(); lm=millis();
+        }
     }
     if(buttonPressed()){
-        if(menuSelection==0){gameMode=MODE_SNAKE; resetAndRedrawSnake();}
-        else               {gameMode=MODE_PACMAN;pacmanInit();}
+        if     (menuSelection==0){ gameMode=MODE_SNAKE;  resetAndRedrawSnake(); }
+        else if(menuSelection==1){ gameMode=MODE_PACMAN; pacmanInit(); }
+        else                     { gameMode=MODE_FLAPPY; flappyInit(); }
     }
 }
 
@@ -158,14 +163,14 @@ static void handleSnake(void){
 #define PM_TILE  8
 #define PM_COLS 28
 #define PM_ROWS 31
-#define PM_OX    8    // pixel x of column 0
-#define PM_OY   16    // pixel y of row 0 (below HUD)
+#define PM_OX    8
+#define PM_OY   16
 
 #define PM_WALL_C   RGB565(33,33,222)
 #define PM_DOT_C    RGB565(255,222,176)
 #define PM_PWR_C    ST77XX_WHITE
 #define PM_PM_C     RGB565(255,255,0)
-#define PM_FREEZE_C RGB565(0,180,255)   // frozen ghost colour
+#define PM_FREEZE_C RGB565(0,180,255)
 #define PM_BG_C     ST77XX_BLACK
 
 static const uint16_t ghostColor[4] PROGMEM = {
@@ -178,24 +183,6 @@ static const uint16_t ghostColor[4] PROGMEM = {
 // ═══════════════════════════════════════════════════════════════
 //  MAZE
 // ═══════════════════════════════════════════════════════════════
-//
-// Column bitmask: bit r = 1 → wall at (col, row).
-//
-// Open horizontal corridor rows (pass through every non-border col):
-//   1, 5, 8, 12, 17, 23, 26, 29
-//
-// Vertical corridor cols (open everywhere except rows 0 and 30):
-//   1, 6, 9, 13, 14, 18, 21, 26
-//
-// Ghost pen: cols 10-17, rows 13-16 are OPEN interior.
-//   Only cols 10 and 17 get the pen-side wall bits on rows 13-16.
-//   This gives ghosts a closed room they can move inside, with exits
-//   at row 12 (corridor) and row 17 (corridor).
-//
-// PELLET ZONE: dots are placed only on open tiles that are NOT in the
-//   pen interior (rows 13-16, cols 10-17) and NOT row 0 or 30.
-//   This is handled in pm_initDots() by the pm_isPenInterior() check.
-
 #define _HCORR ((1ul<<1)|(1ul<<5)|(1ul<<8)|(1ul<<12)|(1ul<<17)|(1ul<<23)|(1ul<<26)|(1ul<<29))
 #define _SHELF  (0x7FFFFFFFul & ~_HCORR)
 #define _PSIDE  ((1ul<<13)|(1ul<<14)|(1ul<<15)|(1ul<<16))
@@ -228,21 +215,19 @@ static inline bool pm_isWall(uint8_t col, uint8_t row){
     if(col>=PM_COLS||row>=PM_ROWS)return true;
     return (pgm_read_dword(&pm_mazeWalls[col])>>row)&1u;
 }
-
-// Returns true for the pen interior cells (where ghosts live but no dots go)
 static inline bool pm_isPenInterior(uint8_t col, uint8_t row){
     return (col>=10&&col<=17&&row>=13&&row<=16);
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  ENTITY STRUCTS + GLOBALS
+//  PAC-MAN ENTITIES + GLOBALS
 // ═══════════════════════════════════════════════════════════════
 struct PacMan { int16_t px,py; int8_t dx,dy,ndx,ndy; uint8_t animTick; };
 struct Ghost  {
     int16_t px,py;
     int8_t  dx,dy;
-    bool    frozen;       // true = power pellet active, ghost stops
-    uint8_t freezeTimer;  // ticks remaining
+    bool    frozen;
+    uint8_t freezeTimer;
 };
 
 static PacMan pm;
@@ -257,18 +242,17 @@ static bool     pm_win;
 static uint32_t pm_lastTick;
 static uint8_t  pm_ghostSlowCtr;
 
-// Pellet bitmask: bit c in pm_dots[r] = dot present at (c,r)
 static uint32_t pm_dots[PM_ROWS];
 static uint8_t  pm_pwrCol[4];
 static uint8_t  pm_pwrRow[4];
 
-#define PM_TICK_MS     220u
-#define PM_FREEZE_TICKS 40u   // how long ghosts stay frozen
+#define PM_TICK_MS      220u
+#define PM_FREEZE_TICKS  40u
 
-// Ghost spawn positions — all inside the open pen interior
-// (cols 11-16, rows 13-16 are open, not wall, not pen-side)
+// FIXED ghost spawn positions — open pen interior tiles
 static const uint8_t ghostStartCol[4] = {12, 13, 14, 15};
 static const uint8_t ghostStartRow[4] = {14, 14, 14, 14};
+
 // ═══════════════════════════════════════════════════════════════
 //  PIXEL ↔ TILE
 // ═══════════════════════════════════════════════════════════════
@@ -296,9 +280,6 @@ static void pm_drawPowerPellet(uint8_t col,uint8_t row){
     tft.fillCircle(PM_OX+col*PM_TILE+PM_TILE/2,
                    PM_OY+row*PM_TILE+PM_TILE/2, 3, PM_PWR_C);
 }
-
-// Restore the background of a tile after a sprite was erased there.
-// Redraws wall border, pellet, or just black as appropriate.
 static void pm_restoreTile(uint8_t col, uint8_t row){
     if(pm_isWall(col,row)){ pm_drawWallTile(col,row); return; }
     pm_fillTile(col,row,PM_BG_C);
@@ -313,10 +294,7 @@ static void pm_restoreTile(uint8_t col, uint8_t row){
 //  PAC-MAN SPRITE
 // ═══════════════════════════════════════════════════════════════
 static void pm_drawPacMan(bool erase){
-    if(erase){
-        pm_restoreTile(px2col(pm.px), py2row(pm.py));
-        return;
-    }
+    if(erase){ pm_restoreTile(px2col(pm.px), py2row(pm.py)); return; }
     int16_t cx=pm.px+PM_TILE/2, cy=pm.py+PM_TILE/2;
     uint8_t r=PM_TILE/2-1;
     tft.fillCircle(cx,cy,r,PM_PM_C);
@@ -334,12 +312,7 @@ static void pm_drawPacMan(bool erase){
 // ═══════════════════════════════════════════════════════════════
 static void pm_drawGhost(uint8_t idx, bool erase){
     int16_t x=gh[idx].px, y=gh[idx].py;
-    if(erase){
-        // Restore whatever was under the ghost (wall / dot / empty)
-        pm_restoreTile(px2col(x), py2row(y));
-        return;
-    }
-    // Body colour: cyan-blue when frozen, normal colour otherwise
+    if(erase){ pm_restoreTile(px2col(x), py2row(y)); return; }
     uint16_t bodyCol = gh[idx].frozen ? PM_FREEZE_C
                                       : pgm_read_word(&ghostColor[idx]);
     tft.fillRoundRect(x,y,PM_TILE,PM_TILE-2,3,bodyCol);
@@ -353,32 +326,25 @@ static void pm_drawGhost(uint8_t idx, bool erase){
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  INIT
+//  PACMAN INIT HELPERS
 // ═══════════════════════════════════════════════════════════════
 static void pm_initDots(void){
     memset(pm_dots,0,sizeof(pm_dots));
     pm_totalDots=pm_dotsEaten=0;
-    for(uint8_t r=0;r<PM_ROWS;r++){
-        for(uint8_t c=0;c<PM_COLS;c++){
-            // Only place dots on truly open, non-pen-interior tiles
-            if(!pm_isWall(c,r) && !pm_isPenInterior(c,r)){
-                pm_dots[r]|=(1ul<<c);
-                pm_totalDots++;
+    for(uint8_t r=0;r<PM_ROWS;r++)
+        for(uint8_t c=0;c<PM_COLS;c++)
+            if(!pm_isWall(c,r)&&!pm_isPenInterior(c,r)){
+                pm_dots[r]|=(1ul<<c); pm_totalDots++;
             }
-        }
-    }
-    // Power pellets at the 4 open corner corridor tiles
     const uint8_t ppPos[4][2]={{1,1},{26,1},{1,29},{26,29}};
     for(uint8_t i=0;i<4;i++){pm_pwrCol[i]=ppPos[i][0];pm_pwrRow[i]=ppPos[i][1];}
 }
-
 static void pm_drawMaze(void){
     for(uint8_t r=0;r<PM_ROWS;r++)
         for(uint8_t c=0;c<PM_COLS;c++)
             if(pm_isWall(c,r)) pm_drawWallTile(c,r);
             else               pm_fillTile(c,r,PM_BG_C);
 }
-
 static void pm_drawAllDots(void){
     for(uint8_t r=0;r<PM_ROWS;r++){
         uint32_t bits=pm_dots[r]; if(!bits)continue;
@@ -390,7 +356,6 @@ static void pm_drawAllDots(void){
         }
     }
 }
-
 static void pm_drawHUD(void){
     tft.fillRect(0,0,SCREEN_W,PM_OY,PM_BG_C);
     tft.setTextSize(1);tft.setTextColor(ST77XX_YELLOW);
@@ -398,25 +363,23 @@ static void pm_drawHUD(void){
     for(uint8_t i=0;i<pm_lives&&i<5;i++) tft.fillCircle(180+i*11,8,4,PM_PM_C);
 }
 
+// FIXED: auto-detect valid first direction
 static void pm_respawnGhost(uint8_t idx){
-    gh[idx].px = col2px(ghostStartCol[idx]);
-    gh[idx].py = row2py(ghostStartRow[idx]);
-
-    // Pick any valid initial direction (don't assume right/left is open)
-    static const int8_t dirs[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
-    gh[idx].dx = 0; gh[idx].dy = 0;
-    for(uint8_t d = 0; d < 4; d++){
-        uint8_t nc = ghostStartCol[idx] + dirs[d][0];
-        uint8_t nr = ghostStartRow[idx] + dirs[d][1];
-        if(!pm_isWall(nc, nr)){
-            gh[idx].dx = dirs[d][0];
-            gh[idx].dy = dirs[d][1];
+    gh[idx].px=col2px(ghostStartCol[idx]);
+    gh[idx].py=row2py(ghostStartRow[idx]);
+    static const int8_t dirs[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
+    gh[idx].dx=0; gh[idx].dy=0;
+    for(uint8_t d=0;d<4;d++){
+        uint8_t nc=(uint8_t)(ghostStartCol[idx]+dirs[d][0]);
+        uint8_t nr=(uint8_t)(ghostStartRow[idx]+dirs[d][1]);
+        if(!pm_isWall(nc,nr)){
+            gh[idx].dx=dirs[d][0];
+            gh[idx].dy=dirs[d][1];
             break;
         }
     }
-
-    gh[idx].frozen = false;
-    gh[idx].freezeTimer = 0;
+    gh[idx].frozen=false;
+    gh[idx].freezeTimer=0;
 }
 
 static void pacmanInit(void){
@@ -428,16 +391,14 @@ static void pacmanInit(void){
     for(uint8_t i=0;i<4;i++) pm_respawnGhost(i);
     pm_initDots();
     tft.fillScreen(PM_BG_C);
-    pm_drawMaze();
-    pm_drawAllDots();
-    pm_drawHUD();
+    pm_drawMaze(); pm_drawAllDots(); pm_drawHUD();
     pm_drawPacMan(false);
     for(uint8_t i=0;i<4;i++) pm_drawGhost(i,false);
     pm_lastTick=millis();
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  JOYSTICK
+//  JOYSTICK (pacman)
 // ═══════════════════════════════════════════════════════════════
 static void pm_readJoystick(void){
     int vx=analogRead(A0), vy=analogRead(A1);
@@ -448,50 +409,30 @@ static void pm_readJoystick(void){
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  PAC-MAN MOVEMENT + PELLET EATING
+//  PAC-MAN MOVEMENT
 // ═══════════════════════════════════════════════════════════════
 static void pm_movePacMan(void){
-    // Snap to tile grid
     uint8_t col=px2col(pm.px), row=py2row(pm.py);
     pm.px=col2px(col); pm.py=row2py(row);
-
-    // Try to turn in the buffered direction
     uint8_t nc=(uint8_t)((int8_t)col+pm.ndx);
     uint8_t nr=(uint8_t)((int8_t)row+pm.ndy);
     if(!pm_isWall(nc,nr)){pm.dx=pm.ndx;pm.dy=pm.ndy;}
-
-    // Move in current direction (keep direction even if blocked)
     nc=(uint8_t)((int8_t)col+pm.dx);
     nr=(uint8_t)((int8_t)row+pm.dy);
     if(!pm_isWall(nc,nr)){pm.px=col2px(nc);pm.py=row2py(nr);col=nc;row=nr;}
-
     pm.animTick++;
-
-    // Eat pellet
     if((pm_dots[row]>>col)&1u){
         pm_dots[row]&=~(1ul<<col);
         pm_dotsEaten++;
-
         bool isPwr=false;
         for(uint8_t i=0;i<4;i++){
-            if(pm_pwrCol[i]==col&&pm_pwrRow[i]==row){
-                isPwr=true;
-                pm_pwrCol[i]=0xFF; // mark consumed
-            }
+            if(pm_pwrCol[i]==col&&pm_pwrRow[i]==row){isPwr=true;pm_pwrCol[i]=0xFF;}
         }
-
         if(isPwr){
             pm_score+=50;
-            // FREEZE all ghosts
-            for(uint8_t i=0;i<4;i++){
-                gh[i].frozen=true;
-                gh[i].freezeTimer=PM_FREEZE_TICKS;
-            }
-        } else {
-            pm_score+=10;
-        }
-
-        pm_fillTile(col,row,PM_BG_C); // erase eaten dot
+            for(uint8_t i=0;i<4;i++){gh[i].frozen=true;gh[i].freezeTimer=PM_FREEZE_TICKS;}
+        } else { pm_score+=10; }
+        pm_fillTile(col,row,PM_BG_C);
         if(pm_dotsEaten>=pm_totalDots) pm_win=true;
         pm_drawHUD();
     }
@@ -502,28 +443,22 @@ static void pm_movePacMan(void){
 // ═══════════════════════════════════════════════════════════════
 static void pm_moveGhost(uint8_t idx){
     Ghost &g=gh[idx];
-    // Snap to tile
     uint8_t gcol=px2col(g.px), grow=py2row(g.py);
     g.px=col2px(gcol); g.py=row2py(grow);
-
     uint8_t pcol=px2col(pm.px), prow=py2row(pm.py);
-
-    // Pick best passable direction (Manhattan distance to Pac-Man)
     static const int8_t dirs[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
     int8_t  bestDx=g.dx, bestDy=g.dy;
     int16_t bestDist=32767;
     bool    found=false;
-
     for(uint8_t d=0;d<4;d++){
         int8_t ndx=dirs[d][0], ndy=dirs[d][1];
-        if(ndx==-g.dx&&ndy==-g.dy) continue; // no U-turn
+        if(ndx==-g.dx&&ndy==-g.dy) continue;
         uint8_t nc=(uint8_t)((int8_t)gcol+ndx);
         uint8_t nr=(uint8_t)((int8_t)grow+ndy);
         if(pm_isWall(nc,nr)) continue;
         int16_t dist=abs((int16_t)nc-pcol)+abs((int16_t)nr-prow);
         if(!found||dist<bestDist){bestDist=dist;bestDx=ndx;bestDy=ndy;found=true;}
     }
-
     g.dx=bestDx; g.dy=bestDy;
     uint8_t nc=(uint8_t)((int8_t)gcol+g.dx);
     uint8_t nr=(uint8_t)((int8_t)grow+g.dy);
@@ -531,29 +466,19 @@ static void pm_moveGhost(uint8_t idx){
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  COLLISION
-// Pixel-overlap check: two 8×8 sprites overlap if their bounding
-// boxes intersect (each axis must have less than PM_TILE separation).
+//  COLLISION (FIXED: half-tile tolerance)
 // ═══════════════════════════════════════════════════════════════
 static void pm_checkCollision(void){
     for(uint8_t i=0;i<4;i++){
-        // Ghost frozen → completely harmless, skip
         if(gh[i].frozen) continue;
-
         int16_t dx=pm.px-gh[i].px;
         int16_t dy=pm.py-gh[i].py;
-        if(dx<0)dx=-dx;
-        if(dy<0)dy=-dy;
-        if(dx > PM_TILE/2 || dy > PM_TILE/2) continue; // no overlap
-
-        // Ghost is active and overlaps → Pac-Man dies
+        if(dx<0)dx=-dx; if(dy<0)dy=-dy;
+        if(dx>PM_TILE/2||dy>PM_TILE/2) continue;
         pm_lives--;
         pm_drawHUD();
         delay(600);
-
         if(pm_lives==0){pm_gameOver=true;return;}
-
-        // Respawn
         pm_drawPacMan(true);
         for(uint8_t j=0;j<4;j++){pm_drawGhost(j,true);pm_respawnGhost(j);}
         pm.px=col2px(13);pm.py=row2py(23);
@@ -561,12 +486,12 @@ static void pm_checkCollision(void){
         delay(800);
         pm_drawPacMan(false);
         for(uint8_t j=0;j<4;j++) pm_drawGhost(j,false);
-        return; // one death per tick
+        return;
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  END SCREEN
+//  PAC-MAN END SCREEN
 // ═══════════════════════════════════════════════════════════════
 static void pm_drawEndScreen(void){
     tft.fillScreen(PM_BG_C);tft.setTextSize(2);
@@ -578,7 +503,7 @@ static void pm_drawEndScreen(void){
 }
 
 // ═══════════════════════════════════════════════════════════════
-//  MAIN PAC-MAN LOOP
+//  PAC-MAN MAIN LOOP
 // ═══════════════════════════════════════════════════════════════
 static void handlePacMan(void){
     if(pm_gameOver||pm_win){
@@ -590,34 +515,248 @@ static void handlePacMan(void){
     if(millis()-pm_lastTick<PM_TICK_MS)return;
     pm_lastTick=millis();
     pm_ghostSlowCtr++;
-
     pm_readJoystick();
-
-    // Erase
     pm_drawPacMan(true);
     for(uint8_t i=0;i<4;i++) pm_drawGhost(i,true);
-
-    // Move Pac-Man
     pm_movePacMan();
-
-    // Move / tick ghosts
     for(uint8_t i=0;i<4;i++){
         if(gh[i].frozen){
-            // Count down freeze timer; ghost stays put
-            if(gh[i].freezeTimer>0){
-                if(--gh[i].freezeTimer==0) gh[i].frozen=false;
-            }
-        } else {
-            pm_moveGhost(i);
+            if(gh[i].freezeTimer>0) if(--gh[i].freezeTimer==0) gh[i].frozen=false;
+        } else { pm_moveGhost(i); }
+    }
+    pm_drawPacMan(false);
+    for(uint8_t i=0;i<4;i++) pm_drawGhost(i,false);
+    pm_checkCollision();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  FLAPPY BIRD CONSTANTS  (minimal pixel-art style)
+// ═══════════════════════════════════════════════════════════════
+#define FB_BIRD_X       50
+#define FB_BIRD_S        6   // bird is a 6×6 white square
+#define FB_GRAVITY       1
+#define FB_FLAP_V       -7
+#define FB_PIPE_W       14   // narrower, plain white outline
+#define FB_PIPE_GAP     60
+#define FB_PIPE_SPEED    3
+#define FB_PIPE_COUNT    3
+#define FB_PIPE_SPACING 100
+#define FB_TICK_MS      45u
+#define FB_BG_C         ST77XX_BLACK
+#define FB_FG_C         ST77XX_WHITE
+#define FB_GROUND_Y     (SCREEN_H - 12)
+
+// ═══════════════════════════════════════════════════════════════
+//  FLAPPY BIRD GLOBALS
+// ═══════════════════════════════════════════════════════════════
+struct FBPipe { int16_t x; int16_t gapY; bool scored; };
+
+static int16_t  fb_birdY;
+static int8_t   fb_birdVY;
+static FBPipe   fb_pipes[FB_PIPE_COUNT];
+static int16_t  fb_score;
+static bool     fb_gameOver;
+static bool     fb_started;
+static uint32_t fb_lastTick;
+
+// ═══════════════════════════════════════════════════════════════
+//  FLAPPY BIRD HELPERS  — delta-only rendering
+//  Each pipe moves FB_PIPE_SPEED px left per tick.
+//  We only paint two thin vertical strips per pipe:
+//    • erase the FB_PIPE_SPEED-wide column vacated on the RIGHT
+//    • draw  the FB_PIPE_SPEED-wide column exposed  on the LEFT
+//  Bird moves vertically only, so we only erase/draw the rows
+//  that changed (the top or bottom sliver based on velocity).
+// ═══════════════════════════════════════════════════════════════
+
+// Full pipe draw/erase — used only on init and pipe recycle
+static void fb_drawPipeFull(uint8_t idx, bool erase){
+    FBPipe &p = fb_pipes[idx];
+    uint16_t c = erase ? FB_BG_C : FB_FG_C;
+    int16_t topH = p.gapY;
+    int16_t botY = p.gapY + FB_PIPE_GAP;
+    int16_t botH = FB_GROUND_Y - botY;
+    if(topH > 0) tft.fillRect(p.x, 0,    FB_PIPE_W, topH, c);
+    if(botH > 0) tft.fillRect(p.x, botY, FB_PIPE_W, botH, c);
+}
+
+// Delta pipe update — only paints the changed strips
+static void fb_updatePipe(uint8_t idx){
+    FBPipe &p = fb_pipes[idx];
+    int16_t oldX = p.x + FB_PIPE_SPEED;   // where it WAS
+    int16_t newX = p.x;                    // where it IS now
+    int16_t topH = p.gapY;
+    int16_t botY = p.gapY + FB_PIPE_GAP;
+    int16_t botH = FB_GROUND_Y - botY;
+    // Erase the right edge strip (now uncovered)
+    if(topH > 0) tft.fillRect(oldX + FB_PIPE_W - FB_PIPE_SPEED, 0,
+                               FB_PIPE_SPEED, topH, FB_BG_C);
+    if(botH > 0) tft.fillRect(oldX + FB_PIPE_W - FB_PIPE_SPEED, botY,
+                               FB_PIPE_SPEED, botH, FB_BG_C);
+    // Draw the new left edge strip
+    if(topH > 0) tft.fillRect(newX, 0,    FB_PIPE_SPEED, topH, FB_FG_C);
+    if(botH > 0) tft.fillRect(newX, botY, FB_PIPE_SPEED, botH, FB_FG_C);
+}
+
+// Bird: 6×6 white square — full draw/erase
+static void fb_drawBirdFull(bool erase){
+    tft.fillRect(FB_BIRD_X - FB_BIRD_S/2, fb_birdY - FB_BIRD_S/2,
+                 FB_BIRD_S, FB_BIRD_S, erase ? FB_BG_C : FB_FG_C);
+}
+
+// Delta bird — only erase the rows left behind, draw the new rows
+// oldY = previous fb_birdY before the move
+static void fb_updateBird(int16_t oldY){
+    int16_t dy = fb_birdY - oldY;
+    if(dy == 0){ fb_drawBirdFull(false); return; }
+    int16_t bx = FB_BIRD_X - FB_BIRD_S/2;
+    if(dy > 0){
+        // moved down: erase top strip, draw bottom strip
+        int16_t er = (dy > FB_BIRD_S) ? FB_BIRD_S : dy;
+        tft.fillRect(bx, oldY - FB_BIRD_S/2, FB_BIRD_S, er,        FB_BG_C);
+        tft.fillRect(bx, fb_birdY + FB_BIRD_S/2 - er, FB_BIRD_S, er, FB_FG_C);
+    } else {
+        // moved up: erase bottom strip, draw top strip
+        int16_t er = (-dy > FB_BIRD_S) ? FB_BIRD_S : -dy;
+        tft.fillRect(bx, oldY + FB_BIRD_S/2 - er, FB_BIRD_S, er,   FB_BG_C);
+        tft.fillRect(bx, fb_birdY - FB_BIRD_S/2, FB_BIRD_S, er,    FB_FG_C);
+    }
+}
+
+// Ground: single white line
+static void fb_drawGround(void){
+    tft.drawFastHLine(0, FB_GROUND_Y, SCREEN_W, FB_FG_C);
+}
+
+// HUD: only redrawn on score change
+static void fb_drawHUD(void){
+    tft.fillRect(0, 0, 72, 10, FB_BG_C);
+    tft.setTextSize(1); tft.setTextColor(FB_FG_C);
+    tft.setCursor(2, 2); tft.print(F("SC:")); tft.print(fb_score);
+}
+
+static void fb_initPipe(uint8_t idx, int16_t startX){
+    fb_pipes[idx].x      = startX;
+    uint8_t range        = (uint8_t)(FB_GROUND_Y - FB_PIPE_GAP - 40);
+    fb_pipes[idx].gapY   = 20 + (int16_t)(TCNT1 % range);
+    fb_pipes[idx].scored = false;
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  flappyInit()
+// ═══════════════════════════════════════════════════════════════
+static void flappyInit(void){
+    fb_score    = 0;
+    fb_gameOver = false;
+    fb_started  = false;
+    fb_birdY    = SCREEN_H / 2;
+    fb_birdVY   = 0;
+    for(uint8_t i=0;i<FB_PIPE_COUNT;i++)
+        fb_initPipe(i, SCREEN_W + 40 + i * FB_PIPE_SPACING);
+    tft.fillScreen(FB_BG_C);
+    fb_drawGround();
+    for(uint8_t i=0;i<FB_PIPE_COUNT;i++) fb_drawPipeFull(i,false);
+    fb_drawBirdFull(false);
+    fb_drawHUD();
+    tft.setTextSize(1); tft.setTextColor(FB_FG_C);
+    tft.setCursor(18, SCREEN_H/2 - 16); tft.print(F("FLAPPY BIRD"));
+    tft.setCursor(10, SCREEN_H/2 + 2);  tft.print(F("Press to flap!"));
+    fb_lastTick = millis();
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  handleFlappy()
+// ═══════════════════════════════════════════════════════════════
+static void handleFlappy(void){
+    // ── Game over screen ────────────────────────────────────────
+    if(fb_gameOver){
+        tft.fillScreen(FB_BG_C);
+        tft.setTextSize(2); tft.setTextColor(FB_FG_C);
+        tft.setCursor(20,100); tft.print(F("GAME OVER"));
+        tft.setTextSize(1);
+        tft.setCursor(35,140); tft.print(F("Score: ")); tft.print(fb_score);
+        tft.setCursor(15,162); tft.print(F("Press button for menu"));
+        while(!buttonPressed()){delay(50);}
+        gameMode=MODE_MENU; menuSelection=2; drawMenu();
+        return;
+    }
+
+    // ── Input ───────────────────────────────────────────────────
+    bool flap=false;
+    if(analogRead(A1)<300) flap=true;
+    if(buttonPressed())    flap=true;
+
+    if(flap && !fb_started){
+        tft.fillRect(0, SCREEN_H/2-20, SCREEN_W, 28, FB_BG_C);
+        fb_started=true;
+    }
+
+    // ── Tick throttle ───────────────────────────────────────────
+    if(millis()-fb_lastTick < FB_TICK_MS) return;
+    fb_lastTick=millis();
+
+    // ── Wait animation — just bob the bird 1px, no pipes involved
+    if(!fb_started){
+        static int8_t hoverDir=1;
+        int16_t oldY = fb_birdY;
+        fb_birdY += hoverDir;
+        if(fb_birdY > SCREEN_H/2+4) hoverDir=-1;
+        if(fb_birdY < SCREEN_H/2-4) hoverDir= 1;
+        fb_updateBird(oldY);
+        return;
+    }
+
+    // ── Physics ─────────────────────────────────────────────────
+    if(flap) fb_birdVY = FB_FLAP_V;
+    fb_birdVY += FB_GRAVITY;
+    if(fb_birdVY >  12) fb_birdVY =  12;
+    if(fb_birdVY < -10) fb_birdVY = -10;
+    int16_t oldBirdY = fb_birdY;
+    fb_birdY += fb_birdVY;
+
+    // ── Collision check ─────────────────────────────────────────
+    if(fb_birdY - FB_BIRD_S/2 <= 0 || fb_birdY + FB_BIRD_S/2 >= FB_GROUND_Y){
+        fb_gameOver=true; return;
+    }
+    for(uint8_t i=0;i<FB_PIPE_COUNT;i++){
+        int16_t bx1=FB_BIRD_X - FB_BIRD_S/2 + 1, bx2=FB_BIRD_X + FB_BIRD_S/2 - 1;
+        int16_t by1=fb_birdY  - FB_BIRD_S/2 + 1, by2=fb_birdY  + FB_BIRD_S/2 - 1;
+        int16_t px1=fb_pipes[i].x,                px2=fb_pipes[i].x + FB_PIPE_W;
+        int16_t gapTop=fb_pipes[i].gapY,          gapBot=fb_pipes[i].gapY + FB_PIPE_GAP;
+        if((bx2>px1)&&(bx1<px2)&&!((by1>gapTop)&&(by2<gapBot))){
+            fb_gameOver=true; return;
         }
     }
 
-    // Redraw
-    pm_drawPacMan(false);
-    for(uint8_t i=0;i<4;i++) pm_drawGhost(i,false);
+    // ── Pipe positions + scoring ─────────────────────────────────
+    bool scoreChanged=false;
+    for(uint8_t i=0;i<FB_PIPE_COUNT;i++){
+        bool recycle = (fb_pipes[i].x + FB_PIPE_W - FB_PIPE_SPEED < 0);
+        if(recycle){
+            // Full erase at old position before repositioning
+            fb_drawPipeFull(i, true);
+            fb_pipes[i].x -= FB_PIPE_SPEED;
+            int16_t maxX=0;
+            for(uint8_t j=0;j<FB_PIPE_COUNT;j++)
+                if(fb_pipes[j].x>maxX) maxX=fb_pipes[j].x;
+            fb_initPipe(i, maxX + FB_PIPE_SPACING);
+            fb_drawPipeFull(i, false);
+        } else {
+            fb_pipes[i].x -= FB_PIPE_SPEED;
+            fb_updatePipe(i);   // delta — only 2×FB_PIPE_SPEED-wide strips
+        }
+        if(!fb_pipes[i].scored && (FB_BIRD_X - FB_BIRD_S/2) > (fb_pipes[i].x + FB_PIPE_W)){
+            fb_pipes[i].scored=true; fb_score++; scoreChanged=true;
+        }
+    }
 
-    // Collision check AFTER drawing (ghosts are in their new positions)
-    pm_checkCollision();
+    // ── Bird delta draw ──────────────────────────────────────────
+    fb_updateBird(oldBirdY);
+
+    // ── Restore ground line (pipes may overwrite bottom pixel) ───
+    tft.drawFastHLine(0, FB_GROUND_Y, SCREEN_W, FB_FG_C);
+
+    if(scoreChanged) fb_drawHUD();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -632,7 +771,7 @@ void setup(void){
     ADMUX =(1u<<REFS0);
     ADCSRA=(1u<<ADEN)|(1u<<ADPS2)|(1u<<ADPS1)|(1u<<ADPS0);
     TCCR1A=0; TCCR1B=(1u<<CS10);
-    gameMode=MODE_MENU;menuSelection=0;
+    gameMode=MODE_MENU; menuSelection=0;
     drawMenu();
     Serial.println(F("Arcade Ready"));
 }
@@ -642,5 +781,6 @@ void loop(void){
         case MODE_MENU:   handleMenu();   break;
         case MODE_SNAKE:  handleSnake();  break;
         case MODE_PACMAN: handlePacMan(); break;
+        case MODE_FLAPPY: handleFlappy(); break;
     }
 }
