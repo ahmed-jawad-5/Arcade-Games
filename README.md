@@ -490,4 +490,4 @@ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
 
 ---
 
-*Built with ❤️ on an Arduino Uno. No HDMI required.*![Uploading WhatsApp Image 2026-06-05 at 4.10.02 PM.jpeg…]()
+*Built with ❤️ on an Arduino Uno. No HDMI required.
