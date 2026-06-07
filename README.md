@@ -1,55 +1,65 @@
-<img width="476" height="848" alt="snake1" src="https://github.com/user-attachments/assets/0a8ec82e-0a3a-4a49-8075-1aec36271ce4" />
+# 🕹️ Arduino Arcade — Snake & Pac-Man
 
-# 🐍 AVR Assembly Snake Game — Arduino Uno + ST7789 TFT
+<img width="921" height="1302" alt="WhatsApp Image 2026-06-05 at 4 10 02 PM" src="https://github.com/user-attachments/assets/c560a428-09f9-465e-888b-604a465101c0" />
 
-A fully playable Snake game running on an **Arduino Uno**, written in **AVR Assembly** for all game logic, with a thin C++ driver layer for display rendering. Controls are handled via an **analog joystick** and the game is displayed on a **240×320 ST7789 TFT LCD** over SPI.
+<img width="973" height="1324" alt="WhatsApp Image 2026-06-05 at 4 10 03 PM" src="https://github.com/user-attachments/assets/7a971681-825a-4fa6-b3fc-b551a59747c0" />
+
+
+
+A dual-game arcade console running on an **Arduino Uno** with an **ST7789 240×320 TFT display** and a **KY-023 analog joystick**. Both games run from a shared boot menu and are written in C++ (with the Snake logic backed by AVR assembly for performance).
 
 ---
 
 ## 📋 Table of Contents
 
 - [Features](#-features)
-- [Hardware Required](#-hardware-required)
-- [Circuit Diagram](#-circuit-diagram)
-- [Wiring Reference](#-wiring-reference)
+- [Hardware Requirements](#-hardware-requirements)
+- [Circuit & Wiring](#-circuit--wiring)
+- [Software & Libraries](#-software--libraries)
 - [Project Structure](#-project-structure)
-- [File-by-File Breakdown](#-file-by-file-breakdown)
-- [How the Game Works](#-how-the-game-works)
-- [Memory Layout](#-memory-layout)
-- [Assembly Architecture](#-assembly-architecture)
-- [Building & Flashing](#-building--flashing)
+- [How to Build & Upload](#-how-to-build--upload)
+- [Gameplay](#-gameplay)
+  - [Boot Menu](#boot-menu)
+  - [Snake](#snake)
+  - [Pac-Man](#pac-man)
 - [Configuration & Tuning](#-configuration--tuning)
+- [Architecture Notes](#-architecture-notes)
+- [Troubleshooting](#-troubleshooting)
+- [License](#-license)
 
 ---
 
 ## ✨ Features
 
-- **100% game logic in AVR Assembly** — movement, collision, food, scoring, RNG
-- **Smooth rendering** — only changed cells are redrawn each frame (no full-screen refresh)
-- **Full 10-bit joystick ADC** with dominant-axis selection and dead-zone
-- **180° reversal prevention** — can't reverse directly into yourself
-- **Self-collision detection** — game over on body hit
-- **Wall collision detection** — game over on border hit
-- **Galois LFSR random number generator** seeded from Timer1 entropy
-- **Growing snake** — tail stays on food pickup, no teleport glitch
-- **Score HUD** — live score display, updates on every food pickup
-- **Auto-restart** — 3-second game-over screen then automatic reset
+| Feature | Detail |
+|---|---|
+| Boot menu | Joystick UP/DOWN to highlight, button to launch |
+| Snake | Assembly-backed game logic, 8-fps smooth scroll |
+| Pac-Man | 28×31 tile maze, 4 coloured ghosts, power-freeze pellets |
+| Mid-game exit | Press joystick button at any time to return to menu |
+| Score HUD | Live score display; lives shown as yellow discs |
+| Shared hardware | One joystick and one display drive both games |
 
 ---
 
-## 🛒 Hardware Required
+## 🔧 Hardware Requirements
 
-| Component | Details |
-|-----------|---------|
-| Arduino Uno | ATmega328P, 16 MHz |
-| ST7789 TFT LCD | 240×320 pixels, SPI interface |
-| Analog Joystick Module | KY-023 or equivalent, dual-axis + button |
-| Jumper Wires | Male-to-male / male-to-female |
-| Breadboard (optional) | For cleaner wiring |
+| Component | Specification | Qty |
+|---|---|---|
+| Arduino Uno | ATmega328P, 5 V | 1 |
+| ST7789 TFT LCD | 240 × 320 px, SPI, 3.3 V logic (most modules have on-board level shifter) | 1 |
+| KY-023 Joystick | Dual-axis analog + push button | 1 |
+| Jumper wires | Male-to-male or Male-to-female depending on your modules | ~14 |
+| Breadboard | Optional — useful for clean GND/VCC distribution | 1 |
+| USB cable | Type-A to Type-B for programming the Uno | 1 |
+
+> **Voltage note:** The ST7789 data lines run at 3.3 V logic on bare modules. Most breakout boards sold as "Arduino compatible" include an onboard 3.3 V regulator and level-shifter, allowing you to drive SPI directly from the Uno's 5 V GPIO without any extra components. Check your specific module's datasheet if you are using a bare chip.
 
 ---
 
-## 🔌 Circuit Diagram
+## 🔌 Circuit & Wiring
+
+### Schematic Diagram
 
 ```
                          ARDUINO UNO
@@ -61,7 +71,7 @@ A fully playable Snake game running on an **Arduino Uno**, written in **AVR Asse
    │  GND ───┼──────┼──┤GND │              │
    │  VRX ───┼──────┼──┤ A0 │  ANALOG IN  │
    │  VRY ───┼──────┼──┤ A1 │              │
-   │  SW  ───┼──────┼──┤ D2 │ (optional)  │
+   │  SW  ───┼──────┼──┤ D2 │ (INPUT_PULLUP)
    └─────────┘      │  └────┘              │
                     │                      │
                     │  SPI / DIGITAL       │
@@ -77,374 +87,407 @@ A fully playable Snake game running on an **Arduino Uno**, written in **AVR Asse
                     └──────────────────────┘
 ```
 
-> ⚠️ **Note:** Some ST7789 modules are **3.3 V logic only**. If your module has a voltage regulator and logic level shifter on-board it can accept 5 V directly. If not, use a logic-level converter on SCK, MOSI, CS, DC, and RST, and connect VCC to the 3.3 V pin instead of 5 V.
+### Pin-by-Pin Reference Table
+
+#### ST7789 TFT Display
+
+| TFT Pin | Arduino Pin | Signal | Notes |
+|---|---|---|---|
+| VCC | 5 V | Power | Module regulator steps down to 3.3 V |
+| GND | GND | Ground | |
+| SCK | D13 | SPI Clock | Hardware SPI SCK |
+| MOSI / SDA | D11 | SPI Data | Hardware SPI MOSI |
+| CS | D10 | Chip Select | Active LOW |
+| DC / RS | D9 | Data / Command | HIGH = data, LOW = command |
+| RST | D8 | Reset | Active LOW |
+
+#### KY-023 Analog Joystick
+
+| Joystick Pin | Arduino Pin | Signal | Notes |
+|---|---|---|---|
+| VCC | 5 V | Power | |
+| GND | GND | Ground | |
+| VRX | A0 | X-axis analog | Left < 300, Centre ≈ 512, Right > 724 |
+| VRY | A1 | Y-axis analog | Up < 300, Centre ≈ 512, Down > 724 |
+| SW | D2 | Button | INPUT_PULLUP — LOW when pressed |
+
+### Wiring Tips
+
+- Keep SPI wires (D10-D13) as short as possible to reduce noise at high clock speeds.
+- The joystick button (SW) uses the Uno's internal pull-up resistor via `INPUT_PULLUP` — no external resistor is needed.
+- If your display flickers, add a 100 nF ceramic decoupling capacitor between the TFT's VCC and GND pins, placed as close to the module as possible.
+- If sharing a breadboard power rail, make sure GND is a single common ground across the Uno, display, and joystick.
 
 ---
 
-## 🔧 Wiring Reference
+## 💾 Software & Libraries
 
-### Joystick → Arduino Uno
+### Arduino IDE / arduino-cli
 
-| Joystick Pin | Arduino Uno Pin | Notes |
-|:---:|:---:|---|
-| VCC | 5V | Power |
-| GND | GND | Ground |
-| VRX | A0 | X-axis analog |
-| VRY | A1 | Y-axis analog |
-| SW | D2 | Button (optional, not used in game logic) |
+Install the following libraries via **Sketch → Include Library → Manage Libraries** (or `arduino-cli lib install`):
 
-### ST7789 TFT LCD → Arduino Uno
+| Library | Author | Purpose |
+|---|---|---|
+| `Adafruit ST7789` | Adafruit | ST7789 TFT driver |
+| `Adafruit GFX Library` | Adafruit | Graphics primitives (circles, rectangles, text) |
 
-| LCD Pin | Arduino Uno Pin | Notes |
-|:---:|:---:|---|
-| VCC | 5V | Power (check your module's voltage!) |
-| GND | GND | Ground |
-| SCK | D13 | SPI Clock (hardware SPI) |
-| MOSI / SDA | D11 | SPI Data (hardware SPI) |
-| CS | D10 | Chip Select |
-| DC / RS | D9 | Data / Command select |
-| RESET / RES | D8 | Hardware reset |
+Both are available directly in the Arduino Library Manager. `Adafruit GFX` is installed automatically as a dependency of `Adafruit ST7789`.
+
+### AVR-GCC (bundled with Arduino IDE)
+
+No separate installation needed — the IDE ships with `avr-gcc` which compiles both the C++ and the `.S` assembly file.
 
 ---
 
 ## 📁 Project Structure
 
 ```
-SnakeGame/
-├── SnakeGame.cpp      ← C++ driver: display, setup(), loop()
-├── Snake_asm.h        ← Shared header: extern declarations for all
-│                         variables and functions defined in .S
-└── snake_logic.S      ← AVR Assembly: ALL game logic
+YourSketchFolder/
+├── SnakeGame.cpp       ← Main source: menu, Snake, Pac-Man
+├── snake_logic.S       ← AVR assembly: Snake game tick & reset
+├── Snake_asm.h         ← C header exposing assembly symbols to C++
+└── README.md           ← This file
 ```
 
-All three files live in the **same sketch folder**. The Arduino IDE / `arduino-cli` automatically compiles `.S` files alongside `.cpp` files in the same directory.
+All three source files must live in the **same sketch folder**. The Arduino IDE and `arduino-cli` automatically compile every `.cpp`, `.c`, and `.S` file found in the sketch directory.
 
----
+### Key Symbols Exported by `snake_logic.S`
 
-## 📄 File-by-File Breakdown
-
----
-
-### `Snake_asm.h` — Shared Interface Header
-
-The bridge between the C++ driver and the assembly game engine.
-
-Declares everything that the assembly `.S` file **defines** so the C++ compiler knows how to link against them:
-
-| Declaration | Type | Purpose |
+| Symbol | Type | Description |
 |---|---|---|
-| `asm_reset_game()` | `void` function | Initialise / restart game state |
-| `asm_game_tick()` | `void` function | Advance one frame |
-| `asm_rand()` | `uint16_t` function | LFSR random number |
-| `req_draw_cell_x/y` | `volatile uint8_t` | Coordinates for next cell draw |
-| `req_draw_cell_color` | `volatile uint16_t` | RGB-565 colour for cell draw |
-| `req_draw_cell` | `volatile uint8_t` | Flag: C must draw a cell |
-| `req_erase_tail` | `volatile uint8_t` | Flag: C must erase old tail |
-| `req_erase_tail_x/y` | `volatile uint8_t` | Tail cell coordinates to erase |
-| `req_spawn_food` | `volatile uint8_t` | Flag: C must draw new food |
-| `req_game_over` | `volatile uint8_t` | Flag: game ended |
-| `req_show_score` | `volatile uint8_t` | Flag: C must refresh score HUD |
-| `game_score` | `volatile int16_t` | Current score |
-| `game_state` | `volatile uint8_t` | 0 = playing, 1 = game over |
-| `snake_x[300]` | `volatile uint8_t[]` | X coords of every snake segment |
-| `snake_y[300]` | `volatile uint8_t[]` | Y coords of every snake segment |
-| `snake_len` | `volatile uint8_t` | Current snake length |
-| `food_x`, `food_y` | `volatile uint8_t` | Food pellet grid position |
-| `rand_state` | `volatile uint16_t` | LFSR internal state |
-
-All variables are declared `volatile` because the assembly writes them asynchronously from the C++ perspective.
+| `asm_reset_game()` | Function | Initialises snake, food, score, and direction |
+| `asm_game_tick()` | Function | Advances one game frame; reads joystick A0/A1 |
+| `snake_x[]` / `snake_y[]` | Arrays | Ring-buffer of snake segment tile positions |
+| `snake_len` | `uint8_t` | Current snake length |
+| `food_x` / `food_y` | `uint8_t` | Current food tile position |
+| `game_score` | `uint16_t` | Running score |
+| `game_state` | `uint8_t` | `0` = playing, `1` = game over |
+| `req_erase_tail` | `uint8_t` | Set by ASM when tail tile must be cleared |
+| `req_draw_cell` | `uint8_t` | Set by ASM when a cell must be drawn |
+| `req_spawn_food` | `uint8_t` | Set by ASM when new food has been placed |
+| `req_show_score` | `uint8_t` | Set by ASM when score display must update |
 
 ---
 
-### `SnakeGame.cpp` — C++ Driver
+## 🚀 How to Build & Upload
 
-Handles everything that requires the **Adafruit library** (hardware SPI, pixel drawing). The assembly cannot call C++ library functions, so a request-flag protocol is used: assembly sets flags, C++ services them after each tick.
+### Using Arduino IDE (1.8 or 2.x)
 
-#### `setup()`
-1. Initialises the ST7789 display in portrait mode (240×320, no rotation)
-2. Configures ADC: AVcc reference, prescaler 128 (~9.6 kHz sample rate)
-3. Starts Timer1 free-running — provides entropy for the LFSR seed
-4. Calls `asm_reset_game()` to initialise all game state in assembly
-5. Draws the HUD label ("Score:") and initial score
-6. Draws the starting 3-segment snake and first food pellet
+1. Create a new sketch and name it `SnakeGame`.
+2. Copy `SnakeGame.cpp`, `snake_logic.S`, and `Snake_asm.h` into the sketch folder (shown in the IDE title bar).
+3. Select **Tools → Board → Arduino Uno**.
+4. Select the correct **Tools → Port** (e.g. `COM3` on Windows or `/dev/ttyUSB0` on Linux).
+5. Click **Upload** (→ arrow button).
 
-#### `loop()`
-Runs at ~8 fps (120 ms delay per frame):
-
-```
-loop() each tick:
-  ├─ game_state == 1?  → drawGameOver(), delay 3s, resetAndRedraw(), return
-  ├─ asm_game_tick()   ← all game logic runs here (assembly)
-  ├─ req_erase_tail?   → drawCell(tail, BLACK)
-  ├─ req_draw_cell?    → drawCell(head, GREEN)
-  ├─ req_spawn_food?   → drawCell(food, ORANGE)
-  └─ req_show_score?   → refresh score area on HUD
-```
-
-#### Helper Functions
-
-| Function | Purpose |
-|---|---|
-| `drawCell(x, y, color)` | Fill one 7×7 pixel grid cell (with 1 px gap) |
-| `drawBorder()` | White rectangle around the play field |
-| `drawScore()` | Erase and redraw the score number on the HUD |
-| `drawInitialSnake()` | Draw all segments after reset |
-| `drawGameOver()` | Full-screen game-over message with final score |
-| `resetAndRedraw()` | Clear screen + call `asm_reset_game()` + redraw board |
-
-#### Grid Maths
-- Screen: 240 × 320 px
-- Cell size: 8 px → Grid: **30 × 40 cells**
-- Cell pixel position: `x * 8 + 1`, `y * 8 + 1`, size `7 × 7`
-- Border occupies row/column 0 and row/column 29/39
-
----
-
-### `snake_logic.S` — AVR Assembly Game Engine
-
-All game logic. No C library calls. Communicates with the C++ driver entirely through shared memory flags in the `.bss` section.
-
-#### `.bss` Section — Shared Variables
-
-All variables live in SRAM, zero-initialised at startup by the C runtime. Layout (in declaration order):
-
-```
-req_draw_cell_x      1 byte  ─┐
-req_draw_cell_y      1 byte   │  Head draw request
-req_draw_cell_color  2 bytes  │  (RGB-565, little-endian)
-req_draw_cell        1 byte  ─┘
-
-req_erase_tail       1 byte  ─┐
-req_erase_tail_x     1 byte   │  Tail erase request
-req_erase_tail_y     1 byte  ─┘
-
-req_spawn_food       1 byte     New food draw request
-req_game_over        1 byte     Game-over signal
-req_show_score       1 byte     Score redraw signal
-
-game_score           2 bytes    Unsigned 16-bit score
-game_state           1 byte     0=playing, 1=game over
-
-snake_x[300]         300 bytes  X coordinate of each segment
-snake_y[300]         300 bytes  Y coordinate of each segment
-snake_len            1 byte     Active length (max 298)
-
-food_x               1 byte     Food grid X
-food_y               1 byte     Food grid Y
-dir_x                1 byte     X velocity: -1, 0, or +1
-dir_y                1 byte     Y velocity: -1, 0, or +1
-rand_state           2 bytes    16-bit LFSR state
-```
-
-Total BSS usage: **~616 bytes** out of 2048 bytes SRAM on the ATmega328P.
-
----
-
-#### `asm_reset_game` — Game Initialisation
-
-Called once from `setup()` and again after each game-over.
-
-1. **Seeds the LFSR** by reading TCNT1L/TCNT1H (Timer1 counter). Since Timer1 starts free-running in `setup()` before this call, the timer value is different on every reset, giving unique food spawn positions each game. Falls back to `0xAC13` if the timer hasn't ticked yet.
-2. **Clears all flags** — game_state, game_score, all req_* flags.
-3. **Sets initial direction** — right (+X), so `dir_x = 1`, `dir_y = 0`.
-4. **Places the snake** — length 3, horizontal, head at grid cell (16, 20):
-   - `snake_x[0]=16, snake_x[1]=15, snake_x[2]=14`
-   - `snake_y[0..2]=20` (all same row)
-5. **Spawns first food** via `spawn_food_rand`.
-6. **Sets `req_show_score`** so C redraws "0" on the HUD.
-
----
-
-#### `asm_game_tick` — Main Game Loop (one frame)
-
-Called every 120 ms from `loop()`. Full execution path per frame:
-
-```
-asm_game_tick:
-  1. read_joystick          ← sample ADC, update dir_x/dir_y
-  2. new_head = head + dir  ← compute candidate next position
-  3. Wall check             ← new_head on border? → gameover
-  4. Self check             ← new_head on any body segment? → gameover
-  5. Food check:
-     ├─ new_head == food?
-     │   ├─ eat_food        ← grow, score++, shift body, spawn food
-     │   └─ → draw_head
-     └─ else:
-         ├─ move_snake      ← erase tail, shift body
-         └─ → draw_head
-  6. draw_head:
-     ├─ set req_draw_cell   ← tell C to draw head GREEN
-     └─ write snake_x[0], snake_y[0] ← save new head position
-```
-
----
-
-#### `move_snake` — Normal Movement
-
-Runs every frame when no food is eaten.
-
-1. **Reads the last segment** (`snake_x/y[len-1]`) and stores its coordinates into `req_erase_tail_x/y`, sets `req_erase_tail = 1`. C will erase this cell BLACK.
-2. **Shifts the body** forward: for `i` from `len-1` down to `1`, copies `snake_x/y[i-1]` → `snake_x/y[i]`. This moves every segment one step toward the tail.
-3. The caller (`asm_game_tick`) then writes the new head into `snake_x[0]`/`snake_y[0]`.
-
----
-
-#### `eat_food` — Food Consumption
-
-Runs when the new head lands on the food cell.
-
-1. **Saves r16/r17** (new head X/Y) onto the stack — critical because the subsequent random calls clobber those registers.
-2. **Increments `snake_len`** — the tail naturally stays in place because `move_snake` is not called.
-3. **Increments `game_score`** (16-bit, carries correctly), sets `req_show_score`.
-4. **Shifts the body** exactly like `move_snake` but with NO tail erase — the last segment stays, making the snake visibly longer.
-5. **Calls `spawn_food_rand`** to place new food.
-6. **Restores r16/r17** from the stack so `draw_head` writes the correct position.
-
----
-
-#### `spawn_food_rand` — Food Placement
-
-Generates a random grid cell for the new food pellet.
-
-1. Calls `asm_rand` → takes low byte → `mod8(value, GRID_W-2)` → adds 1 → stores in `food_x`. Result is in `[1 .. GRID_W-2]` (inside the border).
-2. Same process for `food_y` using `GRID_H-2`.
-3. Sets `req_spawn_food = 1` — C will draw the orange cell.
-
-> **Note:** Food can currently spawn on a body segment. For short snakes this is rare. A future improvement would loop until a free cell is found.
-
----
-
-#### `check_self_collision` — Body Hit Detection
-
-Iterates `snake_x/y[1 .. len-1]` and compares each with the candidate new head (r16, r17). Returns `r22 = 1` on hit, `r22 = 0` otherwise. Index 0 (current head) is skipped because the head hasn't moved yet at this point.
-
----
-
-#### `read_joystick` — Full 10-bit ADC Joystick
-
-The most complex subroutine. Reads both axes via the ATmega328P's built-in ADC and converts the reading into a direction change.
-
-**ADC Sampling:**
-- Sets `ADMUX` to select channel 0 (A0) or 1 (A1) with AVcc reference
-- Sets `ADSC` bit in `ADCSRA` to start a single conversion
-- Polls `ADSC` until it clears (conversion complete, ~104 µs at prescaler 128)
-- Reads `ADCL` first (mandatory to latch `ADCH`), then `ADCH`
-- Right-shifts result twice: 10-bit value → 8-bit (0–255, centre ≈ 128)
-
-**Thresholds (after >>2):**
-```
-  0 ────── 96 ─────── 128 ─────── 160 ──────── 255
-  │  LEFT  │  dead zone  │  dead zone  │  RIGHT  │
-           (UP/DOWN for Y axis)
-```
-
-**Dominant-axis selection:**
-- Computes deflection magnitude `|value - 128|` for both X and Y
-- Compares the two magnitudes — only the **more deflected axis** triggers a direction change
-- Prevents diagonal pushes from firing both axes simultaneously
-
-**180° reversal guard:**
-- Left blocked if currently moving right
-- Right blocked if currently moving left
-- Up blocked if currently moving down
-- Down blocked if currently moving up
-
----
-
-#### `asm_rand` — 16-bit Galois LFSR
-
-A maximal-length linear feedback shift register. Produces a full cycle of 65535 unique values before repeating.
-
-```
-Feedback polynomial: x¹⁶ + x¹⁴ + x¹³ + x¹¹ + 1  (0xB400)
-
-Each call:
-  1. Right-shift rand_state by 1 (lsr/ror)
-  2. If the shifted-out bit was 1 → XOR state with 0xB400
-  3. Store new state, return in r24:r25
-```
-
-Seeded from Timer1 in `asm_reset_game` for different sequences each game.
-
----
-
-## 📐 Memory Layout
-
-| Region | Usage | Notes |
-|---|---|---|
-| Flash (32 KB) | ~4–5 KB | Assembly code + C++ + Adafruit library |
-| SRAM (2 KB) | ~616 B BSS + stack | Snake arrays dominate (600 B) |
-| EEPROM (1 KB) | 0 B | Unused |
-
-The snake arrays are the largest consumers: `snake_x[300]` + `snake_y[300]` = **600 bytes**, supporting a maximum snake length of 298 (the full grid minus border).
-
----
-
-## ⚙️ Assembly Architecture
-
-### Request-Flag Protocol
-
-Assembly cannot call C++ library functions. Instead, a **shared-memory flag protocol** is used:
-
-```
-  Assembly side                    C++ side (after asm_game_tick returns)
-  ─────────────                    ──────────────────────────────────────
-  set req_erase_tail = 1     →     if (req_erase_tail) { drawCell(BLACK); req_erase_tail=0; }
-  set req_draw_cell  = 1     →     if (req_draw_cell)  { drawCell(GREEN); req_draw_cell=0;  }
-  set req_spawn_food = 1     →     if (req_spawn_food) { drawCell(ORANGE);req_spawn_food=0; }
-  set req_show_score = 1     →     if (req_show_score) { drawScore();     req_show_score=0; }
-  set req_game_over  = 1     →     (handled via game_state check at loop top)
-```
-
-Each flag is **cleared by C++ after servicing** — a simple producer/consumer pattern without interrupts.
-
-### Why Two Draw Flags?
-
-Both `req_erase_tail` and `req_draw_cell` are needed because `move_snake` wants to erase the tail **and** `asm_game_tick` wants to draw the head — in the same tick. A single flag would be overwritten. The tail erase goes into `req_erase_tail_x/y`; the head draw goes into `req_draw_cell_x/y/color`. C++ services the erase first, then the head draw, maintaining correct visual order.
-
----
-
-## 🔨 Building & Flashing
-
-### Arduino IDE
-
-1. Place all three files (`SnakeGame.cpp`, `Snake_asm.h`, `snake_logic.S`) in a folder named `SnakeGame`
-2. Open `SnakeGame.cpp` in the Arduino IDE (it will pick up the other files automatically)
-3. Install libraries via **Sketch → Include Library → Manage Libraries**:
-   - `Adafruit ST7735 and ST7789 Library`
-   - `Adafruit GFX Library`
-4. Select **Board: Arduino Uno**, correct **Port**
-5. Click **Upload**
-
-### arduino-cli
+### Using arduino-cli
 
 ```bash
-arduino-cli lib install "Adafruit ST7735 and ST7789 Library" "Adafruit GFX Library"
-arduino-cli compile --fqbn arduino:avr:uno SnakeGame/
-arduino-cli upload  --fqbn arduino:avr:uno --port /dev/ttyUSB0 SnakeGame/
+# Install core and libraries (first time only)
+arduino-cli core install arduino:avr
+arduino-cli lib install "Adafruit ST7789" "Adafruit GFX Library"
+
+# Compile
+arduino-cli compile --fqbn arduino:avr:uno YourSketchFolder/
+
+# Upload (replace /dev/ttyUSB0 with your port)
+arduino-cli upload --fqbn arduino:avr:uno --port /dev/ttyUSB0 YourSketchFolder/
+```
+
+### Expected Flash & RAM Usage (approximate)
+
+| Resource | Used | Available (Uno) |
+|---|---|---|
+| Flash (program storage) | ~22 KB | 32 KB |
+| SRAM | ~1.1 KB | 2 KB |
+| PROGMEM (maze walls, ghost colours) | ~120 B | — |
+
+> The maze wall bitmasks and ghost colour table are stored in flash (`PROGMEM`) to preserve the limited 2 KB SRAM on the ATmega328P.
+
+---
+
+## 🎮 Gameplay
+
+### Boot Menu
+
+When the device powers on you are greeted by the **ARCADE GAMES** boot menu.
+
+```
+  ╔══════════════════╗
+  ║   ARCADE GAMES   ║
+  ╠══════════════════╣
+  ║  1. SNAKE        ║   ← highlighted in green
+  ║  2. PAC-MAN      ║
+  ╠══════════════════╣
+  ║ Joystick UP/DOWN ║
+  ║  Press to start  ║
+  ╚══════════════════╝
+```
+
+| Action | Control |
+|---|---|
+| Move highlight UP | Push joystick UP (VRY < 400) |
+| Move highlight DOWN | Push joystick DOWN (VRY > 624) |
+| Launch selected game | Press joystick button (SW) |
+
+Press the joystick button **at any time during a game** to return to this menu.
+
+---
+
+### Snake
+
+A classic Snake game with assembly-optimised game logic running at approximately 8 fps.
+
+#### Controls
+
+| Action | Joystick |
+|---|---|
+| Move UP | Push UP |
+| Move DOWN | Push DOWN |
+| Move LEFT | Push LEFT |
+| Move RIGHT | Push RIGHT |
+| Return to menu | Press button |
+
+#### Rules
+
+- The snake starts at the centre of the grid moving right.
+- Eating the **orange food pellet** grows the snake by one segment and adds points.
+- Hitting a **wall** or the **snake's own body** ends the game.
+- Score is displayed in the top-left corner.
+- On game over, press the button to return to the menu.
+
+#### Grid
+
+| Property | Value |
+|---|---|
+| Display area | 240 × 320 px |
+| Tile size | 8 × 8 px |
+| Grid dimensions | 30 × 40 tiles |
+| Frame rate | ~8 fps (120 ms delay) |
+
+---
+
+### Pac-Man
+
+A faithful Pac-Man-style game with a 28-column × 31-row tile maze, four coloured ghosts, normal pellets, and power-freeze pellets.
+
+#### Controls
+
+| Action | Joystick |
+|---|---|
+| Move LEFT | Push LEFT |
+| Move RIGHT | Push RIGHT |
+| Move UP | Push UP |
+| Move DOWN | Push DOWN |
+| Return to menu | Press button |
+
+> Pac-Man **always keeps moving** in his current direction. The joystick only queues the next turn — it is applied automatically as soon as the corridor opens, exactly like the original arcade game.
+
+#### Maze Layout
+
+```
+  Col:  0         9  13 14         18        27
+        │         │   │  │          │         │
+Row 0:  ██████████████████████████████████████  ← top border
+Row 1:  █ · · · · · · · · · · · · · · · · · █  ← open corridor + power pellets at corners
+Row 5:  █ ·──· ·──· ·─────────────· ·──· ·──█  ← horizontal shelf
+Row 8:  █ · · · · · · · · · · · · · · · · · █  ← open corridor
+       ...
+Row 12: █ · · · · · · · · · · · · · · · · · █  ← pen exit row (open)
+Row 13: █ ·──·  ┌──────────────────┐  ·──· ·█
+Row 14: █ · · · │  Ghost  Pen      │  · · · █  ← pen interior (no dots)
+Row 15: █ · · · │  (open interior) │  · · · █
+Row 16: █ ·──·  └──────────────────┘  ·──· ·█
+Row 17: █ · · · · · · · · · · · · · · · · · █  ← open corridor
+       ...
+Row 23: █ · · · · ·[PAC-MAN START]· · · · · █
+       ...
+Row 30: ██████████████████████████████████████  ← bottom border
+```
+
+- **Vertical corridors** run at columns 1, 6, 9, 13, 14, 18, 21, 26 — open from top to bottom.
+- **Horizontal corridors** (open rows) are at rows 1, 5, 8, 12, 17, 23, 26, 29 — open across the full width.
+- Everything else is a **shelf wall**.
+
+#### Scoring
+
+| Event | Points |
+|---|---|
+| Eat a normal pellet | +10 |
+| Eat a power-freeze pellet | +50 |
+| Complete all pellets | Win! |
+
+#### Lives
+
+Pac-Man starts with **3 lives**, shown as small yellow discs in the top-right of the HUD. A life is lost whenever an active (non-frozen) ghost touches Pac-Man.
+
+#### The 4 Ghosts
+
+| Ghost | Colour | Personality |
+|---|---|---|
+| Blinky | 🔴 Red | Chases Pac-Man directly (shortest Manhattan path) |
+| Pinky | 🩷 Pink | Same algorithm, different spawn — creates pincer with Blinky |
+| Inky | 🩵 Cyan | Same algorithm, different spawn — fills mid-maze |
+| Clyde | 🟠 Orange | Same algorithm, different spawn — covers right side |
+
+All four ghosts use a **Manhattan-distance minimising** pathfinder. They cannot reverse direction (no 180° U-turns), which keeps their movement natural and predictable.
+
+Ghost spawn positions (inside the pen):
+
+| Ghost | Start column | Start row |
+|---|---|---|
+| Blinky | 11 | 14 |
+| Pinky | 13 | 13 |
+| Inky | 14 | 16 |
+| Clyde | 16 | 14 |
+
+#### Power-Freeze Pellet
+
+The **4 large white pellets** are located at the four near-corner tiles `(1,1)`, `(26,1)`, `(1,29)`, `(26,29)`.
+
+| Normal ghost behaviour | Frozen ghost behaviour |
+|---|---|
+| Chases Pac-Man | Stops moving completely |
+| Kills Pac-Man on touch | Completely harmless — touching does nothing |
+| Normal colour | Turns **cyan-blue** |
+| — | Unfreezes after 40 game ticks (~8.8 seconds) |
+
+> There is **no eat-the-ghost / return-to-base mechanic**. Frozen ghosts simply wait in place and resume chasing when the freeze expires.
+
+#### Win / Lose
+
+| Condition | Result |
+|---|---|
+| All pellets eaten | **YOU WIN!** screen — score shown |
+| 0 lives remaining | **GAME OVER** screen — score shown |
+| Either screen | Press button → return to menu |
+
+---
+
+## ⚙️ Configuration & Tuning
+
+All tunable constants are `#define`s near the top of `SnakeGame.cpp`:
+
+### Snake
+
+| Constant | Default | Effect |
+|---|---|---|
+| `delay(120)` in `handleSnake()` | 120 ms | Game speed — lower = faster snake |
+
+### Pac-Man
+
+| Constant | Default | Effect |
+|---|---|---|
+| `PM_TICK_MS` | `220` | Milliseconds per game tick — raise to slow everything down |
+| `PM_FREEZE_TICKS` | `40` | Ticks ghosts stay frozen after a power pellet |
+
+### Joystick Dead-Zone
+
+The analogue dead-zone is hard-coded in `pm_readJoystick()`:
+
+```cpp
+if      (vx < 300) { /* left  */ }
+else if (vx > 724) { /* right */ }
+else if (vy < 300) { /* up    */ }
+else if (vy > 724) { /* down  */ }
+```
+
+Adjust the thresholds `300` and `724` if your joystick reads off-centre at rest (check with `Serial.println(analogRead(A0))` in `setup()`).
+
+---
+
+## 🏗️ Architecture Notes
+
+### Memory Strategy
+
+The ATmega328P has only **2 KB of SRAM**. To conserve it:
+
+- The maze wall bitmasks (`pm_mazeWalls[28]`, 112 bytes) are stored in **flash** via `PROGMEM` and read back with `pgm_read_dword()`.
+- Ghost colours (`ghostColor[4]`, 8 bytes) are also in `PROGMEM`.
+- String literals use the `F()` macro (`F("GAME OVER")`) to keep them in flash instead of copying to SRAM at boot.
+- Pellet state is packed into `uint32_t pm_dots[31]` — one bit per column per row (31 × 4 = 124 bytes total).
+
+### Rendering Strategy
+
+Rather than redrawing the full screen every frame (which would take ~150 ms on the Uno at 8 MHz SPI), only **changed tiles** are updated each tick:
+
+1. **Erase** Pac-Man and each ghost by calling `pm_restoreTile()` — this redraws the wall outline, dot, or black background that was underneath the sprite, so dots are never accidentally erased.
+2. **Move** all entities.
+3. **Draw** Pac-Man and all ghosts in their new positions.
+
+This keeps the per-frame SPI transfer count to roughly 10–20 filled rectangles instead of 868 (the full maze).
+
+### Collision Detection
+
+Ghost–Pac-Man collision uses a **pixel bounding-box overlap test**:
+
+```cpp
+int16_t dx = pm.px - gh[i].px;   // pixel distance X
+int16_t dy = pm.py - gh[i].py;   // pixel distance Y
+if (abs(dx) < PM_TILE && abs(dy) < PM_TILE) { /* hit */ }
+```
+
+This fires reliably regardless of tile-snap timing and is cheaper than any distance formula.
+
+### Ghost AI
+
+Each ghost evaluates all four cardinal directions every tick, discards its opposite direction (no U-turns), discards wall tiles, then picks the direction with the **minimum Manhattan distance** to Pac-Man's current tile. Frozen ghosts skip the movement step entirely but still tick their freeze counter.
+
+---
+
+## 🛠️ Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| Blank / white screen | SPI wiring error or wrong pin order | Double-check D8/D9/D10/D11/D13 against the wiring table |
+| Display shows garbage | CS or DC pin swapped | Verify D10=CS and D9=DC |
+| Joystick moves the wrong direction | Axis wiring swapped | Swap A0 and A1, or swap VRX/VRY |
+| Left/right reversed | Joystick polarity | Swap the signs in `pm_readJoystick()` or physically rotate the joystick 180° |
+| Button never registers | SW not wired to D2 | Check SW → D2; the code uses `INPUT_PULLUP` so no resistor needed |
+| Ghosts don't move | Ghost spawn tiles are walls | Ensure `snake_logic.S` / maze bitmasks are unmodified |
+| Dots not visible | `pm_initDots()` not called or SRAM full | Check Serial monitor for reset loops; reduce other globals |
+| Sketch won't compile | Missing library | Install `Adafruit ST7789` and `Adafruit GFX` via Library Manager |
+| Low SRAM warning | Too many global variables | Move large arrays to `PROGMEM`; avoid `String` objects |
+| Game resets randomly | SRAM overflow (stack collision) | Check free RAM with `SP - __bss_end`; reduce global state |
+
+### Checking Free RAM at Runtime
+
+Add this helper and call it from `setup()` to print available SRAM over Serial:
+
+```cpp
+int freeRam(){
+    extern int __heap_start, *__brkval;
+    int v;
+    return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
+}
+// In setup():
+Serial.print(F("Free RAM: ")); Serial.println(freeRam());
 ```
 
 ---
 
-## 🎛️ Configuration & Tuning
+## 📄 License
 
-All tuneable constants are at the top of their respective files:
+This project is released under the **MIT License**. You are free to use, modify, and distribute it for personal or commercial purposes with attribution.
 
-| Constant | File | Default | Effect |
-|---|---|---|---|
-| `GRID_SIZE` | `SnakeGame.cpp` | `8` | Pixel size of each cell |
-| `delay(120)` | `SnakeGame.cpp` | `120 ms` | Frame delay — lower = faster game |
-| `GRID_W` | `snake_logic.S` | `30` | Grid width in cells |
-| `GRID_H` | `snake_logic.S` | `40` | Grid height in cells |
-| `JOY_THRESH_LO` | `snake_logic.S` | `96` | Joystick low deflection threshold |
-| `JOY_THRESH_HI` | `snake_logic.S` | `160` | Joystick high deflection threshold |
-| `COLOR_FOOD` | `SnakeGame.cpp` | Orange | Food pellet colour (RGB-565) |
-| `COLOR_SNAKE` | `SnakeGame.cpp` | Green | Snake body colour |
+```
+MIT License
+Copyright (c) 2025
 
-> To make the game faster as the score increases, replace the fixed `delay(120)` in `loop()` with `delay(max(40, 120 - game_score * 5))`.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+```
 
 ---
 
-## 📜 License
-
-Free to use, modify, and distribute for educational and personal projects.
+*Built with ❤️ on an Arduino Uno. No HDMI required.
